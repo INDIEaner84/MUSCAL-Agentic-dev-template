@@ -1,0 +1,63 @@
+name: AI Role Runner
+
+on:
+  repository_dispatch:
+    types: [ai_role_requested]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ai-role-${{ github.event.client_payload.request_id }}
+  cancel-in-progress: false
+
+jobs:
+  route:
+    name: Route ${{ github.event.client_payload.role }} assignment
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      AI_AGENT_WEBHOOK_URL: ${{ secrets.AI_AGENT_WEBHOOK_URL }}
+      AI_AGENT_WEBHOOK_TOKEN: ${{ secrets.AI_AGENT_WEBHOOK_TOKEN }}
+    steps:
+      - name: Check out canonical state
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Reject stale or invalid requests
+        run: python3 scripts/ai/protocol.py verify-request --event "$GITHUB_EVENT_PATH"
+      - name: Send request to configured agent gateway
+        if: ${{ env.AI_AGENT_WEBHOOK_URL != '' }}
+        run: |
+          set -euo pipefail
+          jq '.client_payload' "$GITHUB_EVENT_PATH" > /tmp/ai-role-request.json
+          headers=(-H "Content-Type: application/json")
+          if [[ -n "${AI_AGENT_WEBHOOK_TOKEN:-}" ]]; then
+            headers+=(-H "Authorization: Bearer ${AI_AGENT_WEBHOOK_TOKEN}")
+          fi
+          curl --fail-with-body --show-error --silent \
+            --retry 3 --connect-timeout 15 --max-time 120 \
+            "${headers[@]}" \
+            --data-binary @/tmp/ai-role-request.json \
+            "$AI_AGENT_WEBHOOK_URL"
+      - name: Create idempotent manual handoff when no gateway is configured
+        if: ${{ env.AI_AGENT_WEBHOOK_URL == '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REQUEST_ID: ${{ github.event.client_payload.request_id }}
+          ROLE: ${{ github.event.client_payload.role }}
+          TASK_ID: ${{ github.event.client_payload.task_id }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ai/protocol.py request-markdown --event "$GITHUB_EVENT_PATH" > /tmp/ai-handoff.md
+          existing="$(gh issue list --repo "$REPOSITORY" --state open \
+            --search "\"$REQUEST_ID\" in:body" --json number --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            echo "Manual handoff already exists as issue #$existing."
+          else
+            gh issue create --repo "$REPOSITORY" \
+              --title "AI handoff: $ROLE for $TASK_ID" \
+              --body-file /tmp/ai-handoff.md
+          fi
