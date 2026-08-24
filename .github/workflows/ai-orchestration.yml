@@ -1,0 +1,51 @@
+name: AI Orchestration
+
+on:
+  push:
+    paths:
+      - ".ai/STATE.json"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ai-orchestration-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Validate state and dispatch pending roles
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out canonical branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Validate protocol state
+        run: python3 scripts/ai/protocol.py validate
+      - name: Render idempotent role requests
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF_NAME: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          python3 scripts/ai/protocol.py render-dispatches \
+            --repository "$REPOSITORY" \
+            --ref "$REF_NAME" \
+            --sha "$sha" > /tmp/ai-dispatches.json
+          echo "Rendered $(jq 'length' /tmp/ai-dispatches.json) pending request(s)."
+      - name: Emit provider-neutral repository dispatches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          jq -c '.[]' /tmp/ai-dispatches.json | while IFS= read -r event; do
+            printf '%s\n' "$event" > /tmp/ai-dispatch.json
+            gh api --method POST "repos/$REPOSITORY/dispatches" --input /tmp/ai-dispatch.json
+            echo "Dispatched $(jq -r '.client_payload.request_id' /tmp/ai-dispatch.json)."
+          done
