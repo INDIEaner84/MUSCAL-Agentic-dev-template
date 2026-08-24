@@ -1,0 +1,33 @@
+name: AI Protocol Checks
+
+on:
+  pull_request:
+    paths:
+      - ".ai/**"
+      - "scripts/ai/**"
+      - ".github/workflows/ai-*.yml"
+  push:
+    paths:
+      - ".ai/**"
+      - "scripts/ai/**"
+      - ".github/workflows/ai-*.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate persistent agent protocol
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Validate protocol invariants
+        run: python3 scripts/ai/protocol.py validate
+      - name: Run protocol unit tests
+        run: python3 -m unittest discover -s scripts/ai/tests -v
